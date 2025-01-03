@@ -1,0 +1,23 @@
+[
+  {
+    "name": "NWBankPrivateData",
+    "policy": "OR('NWBankMSP.peer')",
+    "requiredPeerCount": 1,
+    "maxPeerCount": 2,
+    "blockToLive": 0
+  },
+  {
+    "name": "OWBankPrivateData",
+    "policy": "OR('OWBankMSP.peer')",
+    "requiredPeerCount": 1,
+    "maxPeerCount": 2,
+    "blockToLive": 0
+  },
+  {
+    "name": "PWBankPrivateData",
+    "policy": "OR('PWBankMSP.peer')",
+    "requiredPeerCount": 1,
+    "maxPeerCount": 2,
+    "blockToLive": 0
+  }
+]
