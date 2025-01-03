@@ -21,11 +21,13 @@ public class BankChaincode implements ContractInterface{
     private final Gson gson = new GsonBuilder().create();
 
     @Transaction(intent = Transaction.TYPE.SUBMIT)
-    public void addCustomer(Context ctx, String customerId, String firstName, String lastName, String dateOfBirth) {
+    public void addCustomer(Context ctx, String customerId, String firstName, String lastName, String dateOfBirth, String bankCollection) {
         ChaincodeStub stub = ctx.getStub();
         String customerKey = "CUSTOMER_" + customerId;
 
-        if (!stub.getStringState(customerKey).isEmpty()) {
+        // Retrieve the data from the private collection
+        byte[] existingCustomerBytes = stub.getPrivateData(bankCollection, customerKey);
+        if (existingCustomerBytes != null && existingCustomerBytes.length > 0) {
             throw new RuntimeException("Customer already exists with ID: " + customerId);
         }
 
@@ -36,20 +38,26 @@ public class BankChaincode implements ContractInterface{
         customer.setDateOfBirth(dateOfBirth);
 
         String customerJson = gson.toJson(customer);
-        stub.putStringState(customerKey, customerJson);
+
+        // Store customer data in the private collection
+        stub.putPrivateData(bankCollection, customerKey, customerJson);
     }
 
     @Transaction(intent = Transaction.TYPE.SUBMIT)
-    public void addAccount(Context ctx, String accountId, String customerId, String ifscCode, double balance) {
+    public void addAccount(Context ctx, String accountId, String customerId, String ifscCode, double balance, String bankCollection) {
         ChaincodeStub stub = ctx.getStub();
         String accountKey = "ACCOUNT_" + accountId;
         String customerKey = "CUSTOMER_" + customerId;
 
-        if (!stub.getStringState(accountKey).isEmpty()) {
+        // Retrieve the account data from the private collection
+        byte[] existingAccountBytes = stub.getPrivateData(bankCollection, accountKey);
+        if (existingAccountBytes != null && existingAccountBytes.length > 0) {
             throw new RuntimeException("Account already exists with ID: " + accountId);
         }
 
-        if (stub.getStringState(customerKey).isEmpty()) {
+        // Verify customer existence in the private collection
+        byte[] existingCustomerBytes = stub.getPrivateData(bankCollection, customerKey);
+        if (existingCustomerBytes == null || existingCustomerBytes.length == 0) {
             throw new RuntimeException("Customer does not exist with ID: " + customerId);
         }
 
@@ -60,7 +68,9 @@ public class BankChaincode implements ContractInterface{
         account.setBalance(balance);
 
         String accountJson = gson.toJson(account);
-        stub.putStringState(accountKey, accountJson);
+
+        // Store account data in the private collection
+        stub.putPrivateData(bankCollection, accountKey, accountJson);
     }
 
     @Transaction(intent = Transaction.TYPE.SUBMIT)
@@ -75,37 +85,59 @@ public class BankChaincode implements ContractInterface{
         if (fromAccountJson.isEmpty()) {
             throw new RuntimeException("From account does not exist: " + fromAccountId);
         }
-        if (toAccountJson.isEmpty()) {
-            throw new RuntimeException("To account does not exist: " + toAccountId);
-        }
 
         Account fromAccount = gson.fromJson(fromAccountJson, Account.class);
-        Account toAccount = gson.fromJson(toAccountJson, Account.class);
 
+        if (toAccountJson.isEmpty()) {
+            // Inter-bank transaction handling
+            handleInterBankTransaction(ctx, fromAccount, toAccountId, amount);
+        } else {
+            // Same-bank transaction
+            Account toAccount = gson.fromJson(toAccountJson, Account.class);
+            if (!fromAccount.getIfscCode().equals(toAccount.getIfscCode())) {
+                throw new RuntimeException("Inter-bank transactions must use the settlement method.");
+            }
+
+            if (fromAccount.getBalance() < amount) {
+                throw new RuntimeException("Insufficient balance in account: " + fromAccountId);
+            }
+
+            // Update balances
+            fromAccount.setBalance(fromAccount.getBalance() - amount);
+            toAccount.setBalance(toAccount.getBalance() + amount);
+
+            // Save updated accounts
+            stub.putStringState(fromAccountKey, gson.toJson(fromAccount));
+            stub.putStringState(toAccountKey, gson.toJson(toAccount));
+
+            logTransaction(ctx, fromAccountId, fromAccount.getIfscCode(), toAccountId, toAccount.getIfscCode(), amount);
+        }
+    }
+
+    private void handleInterBankTransaction(Context ctx, Account fromAccount, String toAccountId, double amount) {
         if (fromAccount.getBalance() < amount) {
-            throw new RuntimeException("Insufficient balance in account: " + fromAccountId);
+            throw new RuntimeException("Insufficient balance for inter-bank transaction.");
         }
 
-        // Update balances
         fromAccount.setBalance(fromAccount.getBalance() - amount);
-        toAccount.setBalance(toAccount.getBalance() + amount);
+        ctx.getStub().putStringState("ACCOUNT_" + fromAccount.getAccountId(), gson.toJson(fromAccount));
 
-        // Save updated accounts
-        stub.putStringState(fromAccountKey, gson.toJson(fromAccount));
-        stub.putStringState(toAccountKey, gson.toJson(toAccount));
+        // Log inter-bank transaction
+        logTransaction(ctx, fromAccount.getAccountId(), fromAccount.getIfscCode(), toAccountId, "UNKNOWN", amount);
+    }
 
-        // Create transaction record
+    private void logTransaction(Context ctx, String fromAccountId, String fromIfsc, String toAccountId, String toIfsc, double amount) {
         TransactionRecord transaction = new TransactionRecord();
         transaction.setTransactionId(UUID.randomUUID().toString());
         transaction.setFromAccountId(fromAccountId);
-        transaction.setFromIfscCode(fromAccount.getIfscCode());
+        transaction.setFromIfscCode(fromIfsc);
         transaction.setToAccountId(toAccountId);
-        transaction.setToIfscCode(toAccount.getIfscCode());
+        transaction.setToIfscCode(toIfsc);
         transaction.setAmount(amount);
         transaction.setTransactionTime(Instant.now().toString());
 
         String transactionKey = "TRANSACTION_" + transaction.getTransactionId();
-        stub.putStringState(transactionKey, gson.toJson(transaction));
+        ctx.getStub().putStringState(transactionKey, gson.toJson(transaction));
     }
 
     @Transaction(intent = Transaction.TYPE.EVALUATE)
@@ -128,6 +160,25 @@ public class BankChaincode implements ContractInterface{
         String queryString = String.format(
                 "{\"selector\":{\"transactionTime\":{\"$gte\":\"%s\",\"$lte\":\"%s\"},\"$or\":[{\"fromIfscCode\":\"%s\"},{\"toIfscCode\":\"%s\"}]}}",
                 startDate, endDate, ifscCode, ifscCode);
+
+        QueryResultsIterator<KeyValue> results = stub.getQueryResult(queryString);
+        List<TransactionRecord> transactions = new ArrayList<>();
+
+        for (KeyValue result : results) {
+            TransactionRecord transaction = gson.fromJson(result.getStringValue(), TransactionRecord.class);
+            transactions.add(transaction);
+        }
+
+        return gson.toJson(transactions);
+    }
+
+    @Transaction(intent = Transaction.TYPE.EVALUATE)
+    public String queryInterBankTransactions(Context ctx, String startDate, String endDate) {
+        ChaincodeStub stub = ctx.getStub();
+
+        String queryString = String.format(
+                "{\"selector\":{\"transactionTime\":{\"$gte\":\"%s\",\"$lte\":\"%s\"},\"toIfscCode\":\"UNKNOWN\"}}",
+                startDate, endDate);
 
         QueryResultsIterator<KeyValue> results = stub.getQueryResult(queryString);
         List<TransactionRecord> transactions = new ArrayList<>();
