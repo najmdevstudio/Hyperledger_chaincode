@@ -154,6 +154,12 @@
                     <exclude>META-INF/*.DSA</exclude>
                     <exclude>META-INF/*.RSA</exclude>
                   </excludes>
+                  <archive>
+                    <manifest>
+                      <addClasspath>true</addClasspath>
+                      <mainClass>main.java.com.bankchaincode.BankChaincode</mainClass>
+                    </manifest>
+                  </archive>
                 </filter>
               </filters>
             </configuration>
